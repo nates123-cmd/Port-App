@@ -60,6 +60,13 @@
     border-radius:12px;padding:13px 15px;font-family:var(--font-mono);font-size:16px;text-align:center}
   #auth button{padding:13px 22px;border:none;border-radius:12px;background:var(--accent);color:#241a12;font-weight:500;font-size:16px}
   #ctitle{cursor:pointer} .hint{color:var(--muted);font-size:13px;min-height:18px}
+  .assistant .tldr{font-size:15.5px;line-height:1.5}
+  .assistant .q{margin-top:8px;font-weight:500}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
+  .chip{font-family:var(--font-mono);font-size:13px;padding:7px 12px;border-radius:11px;border:1px solid var(--accent);background:rgba(224,163,106,.14);color:var(--ink)}
+  .chip:active{background:rgba(224,163,106,.3)}
+  .chip.ghost{border-color:var(--line);background:transparent;color:var(--muted)}
+  .full{margin-top:9px;padding-top:9px;border-top:1px solid var(--line);color:var(--muted);font-size:13.5px;white-space:pre-wrap;line-height:1.45}
 </style>
 </head>
 <body>
@@ -144,8 +151,25 @@ const seen=new Set();
 function render(m){
   if (seen.has(m.id)) return; seen.add(m.id);
   const d=document.createElement("div"); d.className="msg "+m.role;
-  if (m.role!=="system"){ const r=document.createElement("div"); r.className="role"; r.textContent=m.role; d.appendChild(r); }
-  const c=document.createElement("div"); c.textContent=m.content; d.appendChild(c);
+  if (m.role==="assistant" && m.card){
+    const card=m.card;
+    const t=document.createElement("div"); t.className="tldr"; t.textContent=card.tldr||m.content; d.appendChild(t);
+    if (card.question){ const q=document.createElement("div"); q.className="q"; q.textContent=card.question; d.appendChild(q); }
+    if (card.options && card.options.length){
+      const ch=document.createElement("div"); ch.className="chips";
+      card.options.forEach(o=>{ const b=document.createElement("button"); b.className="chip"; b.textContent=o; b.onclick=()=>sendText(o); ch.appendChild(b); });
+      d.appendChild(ch);
+    }
+    const act=document.createElement("div"); act.className="chips";
+    const more=document.createElement("button"); more.className="chip ghost"; more.textContent="Explain more"; more.onclick=()=>sendText("Explain that in more detail, in plain simple terms."); act.appendChild(more);
+    const fc=document.createElement("div"); fc.className="full"; fc.textContent=m.content; fc.hidden=true;
+    const full=document.createElement("button"); full.className="chip ghost"; full.textContent="Show full \u25be";
+    full.onclick=()=>{ fc.hidden=!fc.hidden; full.textContent=fc.hidden?"Show full \u25be":"Hide \u25b4"; };
+    act.appendChild(full); d.appendChild(act); d.appendChild(fc);
+  } else {
+    if (m.role!=="system"){ const r=document.createElement("div"); r.className="role"; r.textContent=m.role; d.appendChild(r); }
+    const c=document.createElement("div"); c.textContent=m.content; d.appendChild(c);
+  }
   $("log").appendChild(d); $("log").scrollTop=$("log").scrollHeight;
 }
 function setStatus(s){
@@ -168,13 +192,16 @@ $("back").onclick=()=>{ if(msgChan){sb.removeChannel(msgChan);msgChan=null;} cur
 $("ctitle").onclick=async()=>{ if(!cur)return; const v=prompt("Rename session",$("ctitle").textContent); if(v&&v.trim()){ const nn=v.trim(); await sb.from("port_sessions").update({title:nn}).eq("id",cur); $("ctitle").textContent=nn; } };
 $("box").addEventListener("input",()=>{ const b=$("box"); b.style.height="auto"; b.style.height=Math.min(b.scrollHeight,130)+"px"; });
 $("box").addEventListener("keydown",(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); $("form").requestSubmit(); }});
-$("form").onsubmit=async(e)=>{
-  e.preventDefault(); if(!cur) return;
-  const content=$("box").value.trim(); if(!content) return;
-  $("box").value=""; $("box").style.height="auto";
+async function sendText(content){
+  if(!cur||!content) return;
   const { data:{ user } } = await sb.auth.getUser();
   const { error } = await sb.from("port_messages").insert({ session_id:cur, role:"user", content, user_id:user.id });
   if (error) render({ id:"e"+Date.now(), role:"system", content:"send failed: "+error.message });
+}
+$("form").onsubmit=async(e)=>{
+  e.preventDefault();
+  const content=$("box").value.trim(); if(!content) return;
+  $("box").value=""; $("box").style.height="auto"; await sendText(content);
 };
 
 let listChan=null;
