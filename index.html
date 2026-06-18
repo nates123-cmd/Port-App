@@ -67,10 +67,15 @@
   .chip:active{background:rgba(224,163,106,.3)}
   .chip.ghost{border-color:var(--line);background:transparent;color:var(--muted)}
   .full{margin-top:9px;padding-top:9px;border-top:1px solid var(--line);color:var(--muted);font-size:13.5px;white-space:pre-wrap;line-height:1.45}
+  .hdrbtn{margin-left:auto;background:none;border:1px solid var(--line);color:var(--muted);border-radius:9px;padding:5px 10px;font-size:12px;font-family:var(--font-mono)}
+  #sess{margin-left:10px}
+  .delbtn{background:none;border:none;color:var(--muted);font-size:15px;padding:0 0 0 10px;line-height:1}
+  #toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);color:var(--ink);padding:8px 16px;border-radius:20px;font-size:13px;z-index:50}
 </style>
 </head>
 <body>
 <div id="app">
+  <div id="toast" hidden>Copied</div>
   <div id="auth" hidden>
     <h1>Port</h1>
     <p>Claude Code, from your pocket.</p>
@@ -89,6 +94,7 @@
     <header>
       <button class="back" id="back">‹</button>
       <span class="logo" id="ctitle">…</span>
+      <button class="hdrbtn" id="clear">Clear</button>
       <span class="sess" id="sess"></span>
     </header>
     <div id="log"></div>
@@ -136,6 +142,9 @@ function card(s){
     `<span class="name">${esc(s.title||s.project||s.id)}</span>`+
     `<span class="st">${STATE_LABEL[s.state]||s.state}</span></div>`+
     `<div class="last">${esc(s.last_line||"—")}</div>`;
+  const del=document.createElement("button"); del.className="delbtn"; del.textContent="\u2715";
+  del.onclick=(e)=>{ e.stopPropagation(); deleteSession(s); };
+  d.querySelector(".top").appendChild(del);
   return d;
 }
 async function loadSessions(){
@@ -165,10 +174,10 @@ function render(m){
     const fc=document.createElement("div"); fc.className="full"; fc.textContent=m.content; fc.hidden=true;
     const full=document.createElement("button"); full.className="chip ghost"; full.textContent="Show full \u25be";
     full.onclick=()=>{ fc.hidden=!fc.hidden; full.textContent=fc.hidden?"Show full \u25be":"Hide \u25b4"; };
-    act.appendChild(full); d.appendChild(act); d.appendChild(fc);
+    act.appendChild(full); const cp=document.createElement("button"); cp.className="chip ghost"; cp.textContent="Copy"; cp.onclick=()=>copy(m.content); act.appendChild(cp); d.appendChild(act); d.appendChild(fc);
   } else {
     if (m.role!=="system"){ const r=document.createElement("div"); r.className="role"; r.textContent=m.role; d.appendChild(r); }
-    const c=document.createElement("div"); c.textContent=m.content; d.appendChild(c);
+    const c=document.createElement("div"); c.textContent=m.content; c.style.cursor="pointer"; c.title="Tap to copy"; c.onclick=()=>copy(m.content); d.appendChild(c);
   }
   $("log").appendChild(d); $("log").scrollTop=$("log").scrollHeight;
 }
@@ -204,6 +213,11 @@ $("form").onsubmit=async(e)=>{
   $("box").value=""; $("box").style.height="auto"; await sendText(content);
 };
 
+function toast(t){ const e=$("toast"); e.textContent=t; e.hidden=false; clearTimeout(toast._t); toast._t=setTimeout(()=>e.hidden=true,1200); }
+async function copy(t){ try{ await navigator.clipboard.writeText(t); toast("Copied"); }catch{ toast("Copy failed"); } }
+async function deleteSession(s){ if(!confirm(`Delete "${s.title||s.id}"? Removes its chat.`)) return; await sb.from("port_sessions").delete().eq("id",s.id); loadSessions(); }
+async function clearChat(){ if(!cur) return; if(!confirm("Clear all messages in this chat?")) return; await sb.from("port_messages").delete().eq("session_id",cur); $("log").innerHTML=""; seen.clear(); }
+$("clear").onclick=clearChat;
 let listChan=null;
 async function boot(){
   view("listview");
