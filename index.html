@@ -59,7 +59,7 @@
   #auth input{width:min(340px,90vw);background:var(--panel2);color:var(--ink);border:1px solid var(--line);
     border-radius:12px;padding:13px 15px;font-family:var(--font-mono);font-size:16px;text-align:center}
   #auth button{padding:13px 22px;border:none;border-radius:12px;background:var(--accent);color:#241a12;font-weight:500;font-size:16px}
-  .hint{color:var(--muted);font-size:13px;min-height:18px}
+  #ctitle{cursor:pointer} .hint{color:var(--muted);font-size:13px;min-height:18px}
 </style>
 </head>
 <body>
@@ -165,6 +165,7 @@ async function openSession(s){
 }
 $("back").onclick=()=>{ if(msgChan){sb.removeChannel(msgChan);msgChan=null;} cur=null; view("listview"); loadSessions(); };
 
+$("ctitle").onclick=async()=>{ if(!cur)return; const v=prompt("Rename session",$("ctitle").textContent); if(v&&v.trim()){ const nn=v.trim(); await sb.from("port_sessions").update({title:nn}).eq("id",cur); $("ctitle").textContent=nn; } };
 $("box").addEventListener("input",()=>{ const b=$("box"); b.style.height="auto"; b.style.height=Math.min(b.scrollHeight,130)+"px"; });
 $("box").addEventListener("keydown",(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); $("form").requestSubmit(); }});
 $("form").onsubmit=async(e)=>{
