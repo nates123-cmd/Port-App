@@ -72,7 +72,8 @@
   .cardwrap{position:relative;border-radius:var(--radius)}
   .delback{position:absolute;inset:0;background:#7a2f24;color:#fff;display:flex;align-items:center;justify-content:flex-end;padding-right:22px;font-size:14px;border-radius:var(--radius)}
   #toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);color:var(--ink);padding:8px 16px;border-radius:20px;font-size:13px;z-index:50}
-  #newbtn{margin-left:10px}
+  #newbtn{margin-left:8px}
+  #notif{margin-left:auto}
   #newmodal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;z-index:60}
   .sheet{background:var(--panel);border:1px solid var(--line);border-radius:18px 18px 0 0;width:100%;max-width:760px;padding:18px 16px calc(18px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:10px}
   .sheet h2{font-family:var(--font-display);font-weight:600;margin:0 0 2px;font-size:22px}
@@ -102,7 +103,7 @@
   </div>
 
   <div id="listview" hidden>
-    <header><span class="logo">Port</span><span class="sub" id="lsub">sessions</span><button class="hdrbtn" id="newbtn">+ New</button></header>
+    <header><span class="logo">Port</span><span class="sub" id="lsub">sessions</span><button class="hdrbtn" id="notif" title="Enable notifications">\u{1f514}</button><button class="hdrbtn" id="newbtn">+ New</button></header>
     <div id="sessions"></div>
   </div>
 
@@ -126,6 +127,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const SUPABASE_URL = "https://xsmnfcmtbpeaccnyinkr.supabase.co";
 const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhzbW5mY210YnBlYWNjbnlpbmtyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgzODQ3MjksImV4cCI6MjA5Mzk2MDcyOX0.flUt1SAkkt1ppcKCR2XnPKbAaS4PjCLMzi3Gu08jVWo";
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+const VAPID_PUBLIC = "BKG4e5bElkd_GtNWU9JSsrxoRqELKbiISYIyJF8Lj2B70ImUHYyBL2Dag9YsgEfuEAYDjdzkS0NgXihelSDNZmM";
 const $ = (id) => document.getElementById(id);
 const STATE_LABEL = { idle:"idle", working:"working…", waiting:"waiting on you", error:"error" };
 function view(v){ for (const n of ["auth","listview","chatview"]) $(n).hidden = (n!==v); }
@@ -239,6 +241,22 @@ async function copy(t){ try{ await navigator.clipboard.writeText(t); toast("Copi
 async function deleteSession(s){ if(!confirm(`Delete "${s.title||s.id}"? Removes its chat.`)) return; await sb.from("port_sessions").delete().eq("id",s.id); loadSessions(); }
 async function clearChat(){ if(!cur) return; if(!confirm("Clear all messages in this chat?")) return; await sb.from("port_messages").delete().eq("session_id",cur); $("log").innerHTML=""; seen.clear(); }
 $("clear").onclick=clearChat;
+function urlB64ToU8(b){ const pad="=".repeat((4-b.length%4)%4); const s2=(b+pad).replace(/-/g,"+").replace(/_/g,"/"); const raw=atob(s2); return Uint8Array.from([...raw].map(c=>c.charCodeAt(0))); }
+async function enableNotifications(){
+  try{
+    if(!("serviceWorker" in navigator)||!("PushManager" in window)){ toast("Push not supported here"); return; }
+    const perm=await Notification.requestPermission();
+    if(perm!=="granted"){ toast("Notifications blocked"); return; }
+    const reg=await navigator.serviceWorker.ready;
+    let sub=await reg.pushManager.getSubscription();
+    if(!sub) sub=await reg.pushManager.subscribe({ userVisibleOnly:true, applicationServerKey:urlB64ToU8(VAPID_PUBLIC) });
+    const j=sub.toJSON();
+    const { data:{ user } }=await sb.auth.getUser();
+    await sb.from("port_push_subs").upsert({ user_id:user.id, endpoint:j.endpoint, p256dh:j.keys.p256dh, auth:j.keys.auth },{ onConflict:"endpoint" });
+    toast("Notifications on \u2705");
+  }catch(e){ toast("Couldn't enable: "+(e.message||e)); }
+}
+$("notif").onclick=enableNotifications;
 $("newbtn").onclick=()=>{ $("nname").value=""; $("ndir").value=""; $("ntask").value=""; $("newmodal").hidden=false; $("nname").focus(); };
 $("ncancel").onclick=()=>{ $("newmodal").hidden=true; };
 $("newmodal").onclick=(e)=>{ if(e.target.id==="newmodal") $("newmodal").hidden=true; };

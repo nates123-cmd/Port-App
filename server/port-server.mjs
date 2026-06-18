@@ -30,6 +30,7 @@ const POLL_MS = +(process.env.POLL_MS || 2000);
 const MAX_TURN_MS = +(process.env.MAX_TURN_MS || 900000);
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const PUSH_SECRET = process.env.PORT_PUSH_SECRET || "";
 
 function need(k) { const v = process.env[k]; if (!v) { console.error(`missing env ${k}`); process.exit(1); } return v; }
 
@@ -95,6 +96,17 @@ async function makeCard(raw) {
   } catch { return null; }
 }
 
+async function pushNotify(title, body) {
+  if (!PUSH_SECRET) return;
+  try {
+    await fetch(`${URL}/functions/v1/port-push`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${PUSH_SECRET}`, "content-type": "application/json" },
+      body: JSON.stringify({ title: `Port \u00b7 ${title}`, body: (body || "needs your input").slice(0, 160) }),
+    });
+  } catch {}
+}
+
 async function setState(id, state, lastLine) {
   await sb(`port_sessions?id=eq.${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -122,6 +134,7 @@ async function tick() {
         last_line: (res.text || "").slice(0, 200),
         updated_at: new Date().toISOString(),
       }});
+      await pushNotify(sess.title || sess.id, (card && card.tldr) || res.text);
     } catch (e) {
       await sb("port_messages", { method: "POST", body: { user_id: OWNER, session_id: sess.id, role: "assistant", content: `⚠️ ${String(e).slice(0, 500)}`, delivered: true }});
       await setState(sess.id, "error", String(e).slice(0, 200));
