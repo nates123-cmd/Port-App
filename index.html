@@ -72,11 +72,26 @@
   .cardwrap{position:relative;border-radius:var(--radius)}
   .delback{position:absolute;inset:0;background:#7a2f24;color:#fff;display:flex;align-items:center;justify-content:flex-end;padding-right:22px;font-size:14px;border-radius:var(--radius)}
   #toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);color:var(--ink);padding:8px 16px;border-radius:20px;font-size:13px;z-index:50}
+  #newbtn{margin-left:10px}
+  #newmodal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;z-index:60}
+  .sheet{background:var(--panel);border:1px solid var(--line);border-radius:18px 18px 0 0;width:100%;max-width:760px;padding:18px 16px calc(18px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:10px}
+  .sheet h2{font-family:var(--font-display);font-weight:600;margin:0 0 2px;font-size:22px}
+  .sheet input,.sheet textarea{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:11px;padding:11px 13px;font-family:var(--font-mono);font-size:16px;resize:none}
+  .sheetbtns{display:flex;gap:8px;justify-content:flex-end;margin-top:2px}
 </style>
 </head>
 <body>
 <div id="app">
   <div id="toast" hidden>Copied</div>
+  <div id="newmodal" hidden>
+    <div class="sheet">
+      <h2>New session</h2>
+      <input id="nname" placeholder="Name (e.g. Patch triage)" />
+      <input id="ndir" placeholder="Working dir (default /home/nate)" />
+      <textarea id="ntask" rows="3" placeholder="First task / message (e.g. run /patch-triage)"></textarea>
+      <div class="sheetbtns"><button class="chip ghost" id="ncancel">Cancel</button><button class="send" id="nstart">Start</button></div>
+    </div>
+  </div>
   <div id="auth" hidden>
     <h1>Port</h1>
     <p>Claude Code, from your pocket.</p>
@@ -87,7 +102,7 @@
   </div>
 
   <div id="listview" hidden>
-    <header><span class="logo">Port</span><span class="sub" id="lsub">sessions</span></header>
+    <header><span class="logo">Port</span><span class="sub" id="lsub">sessions</span><button class="hdrbtn" id="newbtn">+ New</button></header>
     <div id="sessions"></div>
   </div>
 
@@ -224,6 +239,21 @@ async function copy(t){ try{ await navigator.clipboard.writeText(t); toast("Copi
 async function deleteSession(s){ if(!confirm(`Delete "${s.title||s.id}"? Removes its chat.`)) return; await sb.from("port_sessions").delete().eq("id",s.id); loadSessions(); }
 async function clearChat(){ if(!cur) return; if(!confirm("Clear all messages in this chat?")) return; await sb.from("port_messages").delete().eq("session_id",cur); $("log").innerHTML=""; seen.clear(); }
 $("clear").onclick=clearChat;
+$("newbtn").onclick=()=>{ $("nname").value=""; $("ndir").value=""; $("ntask").value=""; $("newmodal").hidden=false; $("nname").focus(); };
+$("ncancel").onclick=()=>{ $("newmodal").hidden=true; };
+$("newmodal").onclick=(e)=>{ if(e.target.id==="newmodal") $("newmodal").hidden=true; };
+$("nstart").onclick=async()=>{
+  const name=$("nname").value.trim(); if(!name){ $("nname").focus(); return; }
+  const dir=$("ndir").value.trim()||"/home/nate";
+  const task=$("ntask").value.trim();
+  const id=(name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,28)||"session")+"-"+Math.random().toString(36).slice(2,6);
+  const { data:{ user } } = await sb.auth.getUser();
+  const { error } = await sb.from("port_sessions").insert({ id, user_id:user.id, title:name, project:name, cwd:dir, state:"idle" });
+  if (error){ toast("create failed"); return; }
+  if (task) await sb.from("port_messages").insert({ session_id:id, role:"user", content:task, user_id:user.id });
+  $("newmodal").hidden=true;
+  openSession({ id, title:name, project:name, state:"idle" });
+};
 let listChan=null;
 async function boot(){
   view("listview");
