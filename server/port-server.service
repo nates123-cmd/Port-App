@@ -1,0 +1,15 @@
+[Unit]
+Description=Port server — drives Claude Code from Supabase (Port app)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=nate
+EnvironmentFile=/home/nate/port/port-server.env
+ExecStart=/usr/bin/node /home/nate/port/port-server.mjs
+WorkingDirectory=/home/nate/port
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
