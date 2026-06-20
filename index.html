@@ -218,6 +218,10 @@ async function openSession(s){
   $("log").innerHTML=""; seen.clear();
   const { data } = await sb.from("port_messages").select("*").eq("session_id",cur).order("id");
   (data||[]).forEach(render);
+  subscribeChat();
+}
+function subscribeChat(){
+  if(!cur) return;
   if (msgChan) sb.removeChannel(msgChan);
   msgChan = sb.channel("msgs-"+cur)
     .on("postgres_changes",{event:"INSERT",schema:"public",table:"port_messages",filter:`session_id=eq.${cur}`},(p)=>{ if(cur===p.new.session_id) render(p.new); })
@@ -315,6 +319,28 @@ async function boot(){
     .subscribe();
   setInterval(()=>{ if(!cur) loadSessions(); }, 6000);
 }
+// catch up automatically when the app returns to the foreground / network comes back
+// (the realtime socket dies when the phone sleeps, so we re-subscribe + silently re-fetch)
+let waking=false;
+async function onWake(){
+  if (document.visibilityState==="hidden" || waking) return;
+  waking=true;
+  try{
+    const { data:{ session } } = await sb.auth.getSession();
+    if (!session) return;
+    if (cur){ subscribeChat(); await refreshChat(); }
+    else {
+      if (listChan){ sb.removeChannel(listChan); listChan=null; }
+      listChan = sb.channel("sessions")
+        .on("postgres_changes",{event:"*",schema:"public",table:"port_sessions"},()=>{ if(!cur) loadSessions(); })
+        .subscribe();
+      await loadSessions();
+    }
+  } catch{} finally { waking=false; }
+}
+document.addEventListener("visibilitychange", onWake);
+window.addEventListener("focus", onWake);
+window.addEventListener("online", onWake);
 const { data:{ session } } = await sb.auth.getSession();
 if (session) boot(); else view("auth");
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(()=>{});
