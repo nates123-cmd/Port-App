@@ -153,9 +153,21 @@ async function setState(id, state, lastLine) {
 async function tick() {
   // oldest undelivered user messages, owner-scoped
   const msgs = await sb(`port_messages?role=eq.user&delivered=eq.false&user_id=eq.${OWNER}&order=id.asc&limit=5`);
+  const busy = new Set(); // sessions started this tick — one run per session at a time
   for (const m of msgs || []) {
+    if (busy.has(m.session_id)) continue;
     const sess = (await sb(`port_sessions?id=eq.${encodeURIComponent(m.session_id)}&limit=1`))?.[0];
     if (!sess) { await sb(`port_messages?id=eq.${m.id}`, { method: "PATCH", body: { delivered: true } }); continue; }
+    // Per-session lock: skip if a run is genuinely in flight (state=working & fresh). A
+    // 'working' session older than the hard cap is an abandoned run (daemon died) -> reclaim.
+    if (sess.state === "working") {
+      const age = Date.now() - new Date(sess.updated_at || 0).getTime();
+      if (age < MAX_TURN_MS + 60000) { busy.add(m.session_id); continue; }
+    }
+    busy.add(m.session_id);
+    // Claim BEFORE running: mark delivered up front so a crash/restart can't re-spawn a
+    // duplicate run on the same session (concurrent --resume corrupts the session).
+    await sb(`port_messages?id=eq.${m.id}`, { method: "PATCH", body: { delivered: true } });
     try {
       await setState(sess.id, "working", "thinking…");
 
@@ -185,7 +197,9 @@ async function tick() {
       done = true; clearTimeout(timer); pending = null;
       await inflight; // ensure the last streaming write lands before we finalize
 
-      const card = res.ok ? await makeCard(res.text) : null;
+      const summary = res.ok ? await makeCard(res.text) : null;
+      const meta = (res.costUsd != null || res.numTurns != null) ? { cost_usd: res.costUsd, num_turns: res.numTurns } : null;
+      const card = summary ? { ...summary, ...(meta || {}) } : meta; // meta-only card carries cost when there's no summary
       const finalContent = res.text || (res.ok ? "(no output)" : "error");
       if (liveId) {
         await sb(`port_messages?id=eq.${liveId}`, { method: "PATCH", body: { content: finalContent, card } });
@@ -204,8 +218,6 @@ async function tick() {
     } catch (e) {
       await sb("port_messages", { method: "POST", body: { user_id: OWNER, session_id: sess.id, role: "assistant", content: `⚠️ ${String(e).slice(0, 500)}`, delivered: true }});
       await setState(sess.id, "error", String(e).slice(0, 200));
-    } finally {
-      await sb(`port_messages?id=eq.${m.id}`, { method: "PATCH", body: { delivered: true } });
     }
   }
 }

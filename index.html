@@ -62,6 +62,7 @@
   #ctitle{cursor:pointer} .hint{color:var(--muted);font-size:13px;min-height:18px}
   .assistant .tldr{font-size:15.5px;line-height:1.5}
   .assistant .q{margin-top:8px;font-weight:500}
+  .cost{margin-top:8px;font-size:11px;color:var(--muted);opacity:.75;letter-spacing:.3px}
   .tldr.stream::after{content:"▍";color:var(--accent);margin-left:1px;animation:blink 1s steps(1) infinite}
   @keyframes blink{50%{opacity:0}}
   .chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
@@ -187,15 +188,23 @@ async function loadSessions(){
 
 let cur=null, msgChan=null;
 const nodes=new Map();           // message id -> bubble element (so streamed rows update in place)
+function fmtCost(card){
+  if (!card) return null;
+  const parts=[];
+  if (card.cost_usd!=null) parts.push(card.cost_usd<1 ? Math.max(1,Math.round(card.cost_usd*100))+"\u00a2" : "$"+card.cost_usd.toFixed(2));
+  if (card.num_turns!=null) parts.push(card.num_turns+" turn"+(card.num_turns===1?"":"s"));
+  return parts.length ? parts.join(" \u00b7 ") : null;
+}
+function addCost(d,card){ const s=fmtCost(card); if(s){ const e=document.createElement("div"); e.className="cost"; e.textContent=s; d.appendChild(e); } }
 function buildBody(d,m){
   d.innerHTML="";
+  const card=m.card;
   // live placeholder: card={streaming:true} until the daemon finalizes the row
-  if (m.role==="assistant" && m.card && m.card.streaming){
+  if (m.role==="assistant" && card && card.streaming){
     const t=document.createElement("div"); t.className="tldr stream";
     t.textContent=m.content||"working\u2026"; d.appendChild(t); return;
   }
-  if (m.role==="assistant" && m.card){
-    const card=m.card;
+  if (m.role==="assistant" && card && card.tldr){
     const t=document.createElement("div"); t.className="tldr"; t.textContent=card.tldr||m.content; d.appendChild(t);
     if (card.question){ const q=document.createElement("div"); q.className="q"; q.textContent=card.question; d.appendChild(q); }
     if (card.options && card.options.length){
@@ -209,9 +218,11 @@ function buildBody(d,m){
     const full=document.createElement("button"); full.className="chip ghost"; full.textContent="Show full \u25be";
     full.onclick=()=>{ fc.hidden=!fc.hidden; full.textContent=fc.hidden?"Show full \u25be":"Hide \u25b4"; };
     act.appendChild(full); const cp=document.createElement("button"); cp.className="chip ghost"; cp.textContent="Copy"; cp.onclick=()=>copy(m.content); act.appendChild(cp); d.appendChild(act); d.appendChild(fc);
+    addCost(d,card);
   } else {
     if (m.role!=="system"){ const r=document.createElement("div"); r.className="role"; r.textContent=m.role; d.appendChild(r); }
     const c=document.createElement("div"); c.textContent=m.content; c.style.cursor="pointer"; c.title="Tap to copy"; c.onclick=()=>copy(m.content); d.appendChild(c);
+    if (m.role==="assistant") addCost(d,card);   // cost line even when there's no summary card
   }
 }
 function render(m){                // create-or-update the bubble for this message id

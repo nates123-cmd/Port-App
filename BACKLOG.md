@@ -13,6 +13,11 @@ Supabase project `xsmnfcmtbpeaccnyinkr`; tables `port_sessions`, `port_messages`
 ---
 
 ## ✅ Done
+- **#1 Per-session run lock** + claim-before-run (daemon) — one run per session, mark delivered
+  up front (re-entrancy safe), reclaim abandoned `working` sessions older than the hard cap.
+  *Code shipped; takes effect on the next idle daemon restart.*
+- **#9 Cost-per-task** — daemon writes `cost_usd`/`num_turns` onto the finalized card; frontend
+  shows "6¢ · 4 turns" under the reply. sw v13. *Cost appears on replies handled after restart.*
 - Live updates — stream `claude` reply into the chat bubble as it's written (daemon stream-json
   + live row; frontend render-by-id + message UPDATE subscription + cursor). sw v12.
 - Swipe-up-at-bottom to refresh the chat. sw v10.
