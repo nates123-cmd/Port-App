@@ -62,6 +62,8 @@
   #ctitle{cursor:pointer} .hint{color:var(--muted);font-size:13px;min-height:18px}
   .assistant .tldr{font-size:15.5px;line-height:1.5}
   .assistant .q{margin-top:8px;font-weight:500}
+  .tldr.stream::after{content:"▍";color:var(--accent);margin-left:1px;animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
   .chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
   .chip{font-family:var(--font-mono);font-size:13px;padding:7px 12px;border-radius:11px;border:1px solid var(--accent);background:rgba(224,163,106,.14);color:var(--ink)}
   .chip:active{background:rgba(224,163,106,.3)}
@@ -184,10 +186,14 @@ async function loadSessions(){
 }
 
 let cur=null, msgChan=null;
-const seen=new Set();
-function render(m){
-  if (seen.has(m.id)) return; seen.add(m.id);
-  const d=document.createElement("div"); d.className="msg "+m.role;
+const nodes=new Map();           // message id -> bubble element (so streamed rows update in place)
+function buildBody(d,m){
+  d.innerHTML="";
+  // live placeholder: card={streaming:true} until the daemon finalizes the row
+  if (m.role==="assistant" && m.card && m.card.streaming){
+    const t=document.createElement("div"); t.className="tldr stream";
+    t.textContent=m.content||"working\u2026"; d.appendChild(t); return;
+  }
   if (m.role==="assistant" && m.card){
     const card=m.card;
     const t=document.createElement("div"); t.className="tldr"; t.textContent=card.tldr||m.content; d.appendChild(t);
@@ -207,7 +213,15 @@ function render(m){
     if (m.role!=="system"){ const r=document.createElement("div"); r.className="role"; r.textContent=m.role; d.appendChild(r); }
     const c=document.createElement("div"); c.textContent=m.content; c.style.cursor="pointer"; c.title="Tap to copy"; c.onclick=()=>copy(m.content); d.appendChild(c);
   }
-  $("log").appendChild(d); $("log").scrollTop=$("log").scrollHeight;
+}
+function render(m){                // create-or-update the bubble for this message id
+  if (m.id==null){ const d=document.createElement("div"); d.className="msg "+m.role; buildBody(d,m); $("log").appendChild(d); $("log").scrollTop=$("log").scrollHeight; return; }
+  let d=nodes.get(m.id); const fresh=!d;
+  const stuck = $("log").scrollHeight - $("log").scrollTop - $("log").clientHeight < 60; // only autoscroll if near bottom
+  if (fresh){ d=document.createElement("div"); nodes.set(m.id,d); }
+  d.className="msg "+m.role; buildBody(d,m);
+  if (fresh) $("log").appendChild(d);
+  if (fresh || stuck) $("log").scrollTop=$("log").scrollHeight;
 }
 function setStatus(s){
   if (!s) return;
@@ -215,7 +229,7 @@ function setStatus(s){
 }
 async function openSession(s){
   cur=s.id; view("chatview"); $("ctitle").textContent=s.title||s.project||s.id; setStatus(s);
-  $("log").innerHTML=""; seen.clear();
+  $("log").innerHTML=""; nodes.clear();
   const { data } = await sb.from("port_messages").select("*").eq("session_id",cur).order("id");
   (data||[]).forEach(render);
   subscribeChat();
@@ -225,6 +239,7 @@ function subscribeChat(){
   if (msgChan) sb.removeChannel(msgChan);
   msgChan = sb.channel("msgs-"+cur)
     .on("postgres_changes",{event:"INSERT",schema:"public",table:"port_messages",filter:`session_id=eq.${cur}`},(p)=>{ if(cur===p.new.session_id) render(p.new); })
+    .on("postgres_changes",{event:"UPDATE",schema:"public",table:"port_messages",filter:`session_id=eq.${cur}`},(p)=>{ if(cur===p.new.session_id) render(p.new); })
     .on("postgres_changes",{event:"UPDATE",schema:"public",table:"port_sessions",filter:`id=eq.${cur}`},(p)=>setStatus(p.new))
     .subscribe();
 }
@@ -277,7 +292,7 @@ async function refreshChat(){
 function toast(t){ const e=$("toast"); e.textContent=t; e.hidden=false; clearTimeout(toast._t); toast._t=setTimeout(()=>e.hidden=true,1200); }
 async function copy(t){ try{ await navigator.clipboard.writeText(t); toast("Copied"); }catch{ toast("Copy failed"); } }
 async function deleteSession(s){ if(!confirm(`Delete "${s.title||s.id}"? Removes its chat.`)) return; await sb.from("port_sessions").delete().eq("id",s.id); loadSessions(); }
-async function clearChat(){ if(!cur) return; if(!confirm("Clear all messages in this chat?")) return; await sb.from("port_messages").delete().eq("session_id",cur); $("log").innerHTML=""; seen.clear(); }
+async function clearChat(){ if(!cur) return; if(!confirm("Clear all messages in this chat?")) return; await sb.from("port_messages").delete().eq("session_id",cur); $("log").innerHTML=""; nodes.clear(); }
 $("clear").onclick=clearChat;
 function urlB64ToU8(b){ const pad="=".repeat((4-b.length%4)%4); const s2=(b+pad).replace(/-/g,"+").replace(/_/g,"/"); const raw=atob(s2); return Uint8Array.from([...raw].map(c=>c.charCodeAt(0))); }
 async function enableNotifications(){

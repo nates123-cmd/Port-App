@@ -4,9 +4,10 @@
  * Dependency-free (Node 18+ fetch + child_process).
  *
  * Loop: poll port_messages for undelivered user messages -> run headless
- * `claude -p <msg> --resume <sid> --output-format json` in the session's cwd ->
- * write the assistant reply back + update session state. No inbound ports; only
- * outbound HTTPS to Supabase. The PWA reads/writes Supabase directly.
+ * `claude -p <msg> --resume <sid> --output-format stream-json` in the session's
+ * cwd -> stream the reply into a live assistant row (the PWA watches UPDATEs and
+ * fills the bubble as text arrives) -> finalize with clean text + card. No
+ * inbound ports; only outbound HTTPS to Supabase. The PWA reads/writes Supabase.
  *
  * Env (see port-server.env):
  *   SUPABASE_URL, SUPABASE_SERVICE_KEY   (service_role; this is a trusted server)
@@ -28,6 +29,7 @@ const PERM = process.env.PERMISSION_MODE || "";
 const ALLOWED = process.env.ALLOWED_TOOLS || "";
 const POLL_MS = +(process.env.POLL_MS || 2000);
 const MAX_TURN_MS = +(process.env.MAX_TURN_MS || 900000);
+const LIVE_MS = +(process.env.LIVE_MS || 600); // min gap between live stream writes
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const PUSH_SECRET = process.env.PORT_PUSH_SECRET || "";
@@ -49,26 +51,60 @@ async function sb(path, { method = "GET", body, prefer } = {}) {
   return t ? JSON.parse(t) : null;
 }
 
-function runClaude({ prompt, cwd, resumeId }) {
+// Run claude in streaming mode. onLive(text) fires as the reply grows (already
+// throttled by the caller is unnecessary — we just emit; caller decides cadence).
+function runClaudeStream({ prompt, cwd, resumeId, onLive }) {
   return new Promise((resolve) => {
-    const args = ["-p", prompt, "--output-format", "json"];
+    const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
     if (resumeId) args.push("--resume", resumeId);
     if (PERM) args.push("--permission-mode", PERM);
     if (ALLOWED) args.push("--allowedTools", ALLOWED);
     const child = spawn(CLAUDE, args, { cwd: cwd || homedir(), env: process.env });
-    let out = "", err = "";
+    let buf = "", live = "", finalText = "", sessionId = resumeId || null;
+    let isError = false, costUsd = null, numTurns = null, errText = "";
     const killer = setTimeout(() => child.kill("SIGKILL"), MAX_TURN_MS);
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (err += d));
+
+    function feed(ev) {
+      if (ev.session_id) sessionId = ev.session_id;
+      if (ev.type === "stream_event") {
+        const e = ev.event;
+        if (e?.type === "content_block_start") {
+          const cb = e.content_block;
+          if (cb?.type === "tool_use") { live += `${live && !live.endsWith("\n") ? "\n" : ""}🔧 ${cb.name || "tool"}…\n`; onLive(live); }
+          else if (cb?.type === "text" && live && !live.endsWith("\n")) { live += "\n"; }
+        } else if (e?.type === "content_block_delta" && e.delta?.type === "text_delta") {
+          live += e.delta.text; onLive(live);
+        }
+        return;
+      }
+      if (ev.type === "result") {
+        if (typeof ev.result === "string" && ev.result) finalText = ev.result;
+        costUsd = ev.total_cost_usd ?? costUsd;
+        numTurns = ev.num_turns ?? numTurns;
+        isError = !!ev.is_error;
+      }
+    }
+
+    child.stdout.on("data", (d) => {
+      buf += d.toString();
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let ev; try { ev = JSON.parse(line); } catch { continue; }
+        try { feed(ev); } catch { /* ignore one bad event */ }
+      }
+    });
+    child.stderr.on("data", (d) => (errText += d.toString()));
     child.on("close", (code) => {
       clearTimeout(killer);
-      let parsed = null;
-      try { parsed = JSON.parse(out); } catch { /* not json */ }
-      if (parsed && !parsed.is_error) {
-        resolve({ ok: true, text: parsed.result ?? "", sessionId: parsed.session_id ?? resumeId ?? null });
-      } else {
-        resolve({ ok: false, text: (parsed?.result || err || out || `claude exited ${code}`).slice(0, 4000), sessionId: resumeId ?? null });
-      }
+      const text = finalText || live;
+      const ok = !isError && finalText !== "";
+      resolve({
+        ok,
+        text: ok ? text : (text || errText || `claude exited ${code}`).slice(0, 4000),
+        sessionId, costUsd, numTurns,
+      });
     });
   });
 }
@@ -102,7 +138,7 @@ async function pushNotify(title, body) {
     await fetch(`${URL}/functions/v1/port-push`, {
       method: "POST",
       headers: { authorization: `Bearer ${PUSH_SECRET}`, "content-type": "application/json" },
-      body: JSON.stringify({ title: `Port \u00b7 ${title}`, body: (body || "needs your input").slice(0, 160) }),
+      body: JSON.stringify({ title: `Port · ${title}`, body: (body || "needs your input").slice(0, 160) }),
     });
   } catch {}
 }
@@ -122,19 +158,49 @@ async function tick() {
     if (!sess) { await sb(`port_messages?id=eq.${m.id}`, { method: "PATCH", body: { delivered: true } }); continue; }
     try {
       await setState(sess.id, "working", "thinking…");
-      const res = await runClaude({ prompt: m.content, cwd: sess.cwd, resumeId: sess.claude_session_id });
+
+      // Create the live assistant row the PWA fills in as text streams (card.streaming = placeholder).
+      const ins = await sb("port_messages", {
+        method: "POST",
+        prefer: "return=representation",
+        body: { user_id: OWNER, session_id: sess.id, role: "assistant", content: "", card: { streaming: true }, delivered: true },
+      });
+      const liveId = ins?.[0]?.id || null;
+
+      // Throttled live writer: at most one PATCH per LIVE_MS, one in flight, trailing edge guaranteed.
+      let pending = null, inflight = Promise.resolve(), timer = null, last = 0, done = false;
+      const flushNow = () => {
+        if (!liveId || pending === null) return;
+        const t = pending; pending = null; last = Date.now();
+        inflight = sb(`port_messages?id=eq.${liveId}`, { method: "PATCH", body: { content: t.slice(0, 12000), card: { streaming: true } } }).catch(() => {});
+      };
+      const onLive = (t) => {
+        if (done || !liveId) return;
+        pending = t;
+        if (Date.now() - last >= LIVE_MS) flushNow();
+        else { clearTimeout(timer); timer = setTimeout(flushNow, LIVE_MS); }
+      };
+
+      const res = await runClaudeStream({ prompt: m.content, cwd: sess.cwd, resumeId: sess.claude_session_id, onLive });
+      done = true; clearTimeout(timer); pending = null;
+      await inflight; // ensure the last streaming write lands before we finalize
+
       const card = res.ok ? await makeCard(res.text) : null;
-      await sb("port_messages", { method: "POST", body: {
-        user_id: OWNER, session_id: sess.id, role: "assistant",
-        content: res.text || (res.ok ? "(no output)" : "error"), card, delivered: true,
-      }});
+      const finalContent = res.text || (res.ok ? "(no output)" : "error");
+      if (liveId) {
+        await sb(`port_messages?id=eq.${liveId}`, { method: "PATCH", body: { content: finalContent, card } });
+      } else {
+        await sb("port_messages", { method: "POST", body: {
+          user_id: OWNER, session_id: sess.id, role: "assistant", content: finalContent, card, delivered: true,
+        }});
+      }
       await sb(`port_sessions?id=eq.${encodeURIComponent(sess.id)}`, { method: "PATCH", body: {
         claude_session_id: res.sessionId || sess.claude_session_id,
         state: res.ok ? "waiting" : "error",
-        last_line: (res.text || "").slice(0, 200),
+        last_line: finalContent.slice(0, 200),
         updated_at: new Date().toISOString(),
       }});
-      await pushNotify(sess.title || sess.id, (card && card.tldr) || res.text);
+      if (card && card.question) await pushNotify(sess.title || sess.id, card.question); // ping only when it asks a decision
     } catch (e) {
       await sb("port_messages", { method: "POST", body: { user_id: OWNER, session_id: sess.id, role: "assistant", content: `⚠️ ${String(e).slice(0, 500)}`, delivered: true }});
       await setState(sess.id, "error", String(e).slice(0, 200));
@@ -144,7 +210,7 @@ async function tick() {
   }
 }
 
-console.log(`[port-server] up. claude=${CLAUDE} perm=${PERM || "(none!)"} poll=${POLL_MS}ms`);
+console.log(`[port-server] up. claude=${CLAUDE} perm=${PERM || "(none!)"} poll=${POLL_MS}ms stream=on`);
 for (;;) {
   try { await tick(); } catch (e) { console.error("[tick]", String(e).slice(0, 300)); }
   await new Promise((r) => setTimeout(r, POLL_MS));
