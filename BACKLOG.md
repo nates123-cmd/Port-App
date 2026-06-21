@@ -13,6 +13,9 @@ Supabase project `xsmnfcmtbpeaccnyinkr`; tables `port_sessions`, `port_messages`
 ---
 
 ## ✅ Done
+- **Concurrent sessions** — daemon runs up to `MAX_CONCURRENT` (default 3, env-tunable) distinct
+  sessions at once instead of one-at-a-time. Per-session lock keeps a single session serial and
+  ordered; reaper skips actively-running sessions. Set `MAX_CONCURRENT=1` for the old serial behavior.
 - **#2 Stuck-`working` reaper** — daemon sweeps abandoned working sessions (age > hard cap) → error.
 - **#3 Graceful turn cap** — on the 15-min kill, posts "reply 'continue' to resume" + a push, state stays resumable (not error).
 - **#4 Stop button** — header Stop while running sets session state `stop`; daemon polls every 2.5s and kills the run → "■ Stopped."

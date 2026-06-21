@@ -30,6 +30,8 @@ const ALLOWED = process.env.ALLOWED_TOOLS || "";
 const POLL_MS = +(process.env.POLL_MS || 2000);
 const MAX_TURN_MS = +(process.env.MAX_TURN_MS || 900000);
 const LIVE_MS = +(process.env.LIVE_MS || 600); // min gap between live stream writes
+const MAX_CONCURRENT = +(process.env.MAX_CONCURRENT || 3); // distinct sessions that can run at once
+const running = new Set(); // session ids with a run in flight (this daemon)
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const PUSH_SECRET = process.env.PORT_PUSH_SECRET || "";
@@ -158,32 +160,7 @@ async function setState(id, state, lastLine) {
   });
 }
 
-async function tick() {
-  // #2 reaper: flip abandoned 'working' sessions (daemon died mid-run) back to error so they
-  // stop spinning forever and the per-session lock releases. Threshold > hard cap, so a legit
-  // long run (updated_at stamped at run start) is never falsely reaped.
-  const stuck = await sb(`port_sessions?state=eq.working&user_id=eq.${OWNER}&select=id,updated_at`);
-  for (const s of stuck || []) {
-    if (Date.now() - new Date(s.updated_at || 0).getTime() > MAX_TURN_MS + 60000)
-      await setState(s.id, "error", "run abandoned (daemon restart?) — send a message to retry");
-  }
-  // oldest undelivered user messages, owner-scoped
-  const msgs = await sb(`port_messages?role=eq.user&delivered=eq.false&user_id=eq.${OWNER}&order=id.asc&limit=5`);
-  const busy = new Set(); // sessions started this tick — one run per session at a time
-  for (const m of msgs || []) {
-    if (busy.has(m.session_id)) continue;
-    const sess = (await sb(`port_sessions?id=eq.${encodeURIComponent(m.session_id)}&limit=1`))?.[0];
-    if (!sess) { await sb(`port_messages?id=eq.${m.id}`, { method: "PATCH", body: { delivered: true } }); continue; }
-    // Per-session lock: skip if a run is genuinely in flight (state=working & fresh). A
-    // 'working' session older than the hard cap is an abandoned run (daemon died) -> reclaim.
-    if (sess.state === "working") {
-      const age = Date.now() - new Date(sess.updated_at || 0).getTime();
-      if (age < MAX_TURN_MS + 60000) { busy.add(m.session_id); continue; }
-    }
-    busy.add(m.session_id);
-    // Claim BEFORE running: mark delivered up front so a crash/restart can't re-spawn a
-    // duplicate run on the same session (concurrent --resume corrupts the session).
-    await sb(`port_messages?id=eq.${m.id}`, { method: "PATCH", body: { delivered: true } });
+async function processMessage(sess, content) {
     try {
       await setState(sess.id, "working", "thinking…");
 
@@ -212,7 +189,7 @@ async function tick() {
       const checkStop = async () => {
         try { const s = (await sb(`port_sessions?id=eq.${encodeURIComponent(sess.id)}&select=state`))?.[0]; return s?.state === "stop"; } catch { return false; }
       };
-      const res = await runClaudeStream({ prompt: m.content, cwd: sess.cwd, resumeId: sess.claude_session_id, onLive, checkStop });
+      const res = await runClaudeStream({ prompt: content, cwd: sess.cwd, resumeId: sess.claude_session_id, onLive, checkStop });
       done = true; clearTimeout(timer); pending = null;
       await inflight; // ensure the last streaming write lands before we finalize
 
@@ -243,10 +220,37 @@ async function tick() {
       await sb("port_messages", { method: "POST", body: { user_id: OWNER, session_id: sess.id, role: "assistant", content: `⚠️ ${String(e).slice(0, 500)}`, delivered: true }});
       await setState(sess.id, "error", String(e).slice(0, 200));
     }
+}
+
+async function tick() {
+  // #2 reaper: flip abandoned 'working' sessions (daemon died mid-run) back to error so they stop
+  // spinning forever and the lock releases. Threshold > hard cap so a legit long run is never
+  // falsely reaped; skip sessions this daemon is actively running.
+  const stuck = await sb(`port_sessions?state=eq.working&user_id=eq.${OWNER}&select=id,updated_at`);
+  for (const s of stuck || []) {
+    if (!running.has(s.id) && Date.now() - new Date(s.updated_at || 0).getTime() > MAX_TURN_MS + 60000)
+      await setState(s.id, "error", "run abandoned (daemon restart?) — send a message to retry");
+  }
+  if (running.size >= MAX_CONCURRENT) return; // all run slots busy
+
+  // Launch up to MAX_CONCURRENT distinct sessions concurrently; never two runs on one session,
+  // and messages within a session stay ordered (oldest first; same-session extras wait their turn).
+  const msgs = await sb(`port_messages?role=eq.user&delivered=eq.false&user_id=eq.${OWNER}&order=id.asc&limit=10`);
+  for (const m of msgs || []) {
+    if (running.size >= MAX_CONCURRENT) break;
+    if (running.has(m.session_id)) continue; // a run for this session is already in flight
+    const sess = (await sb(`port_sessions?id=eq.${encodeURIComponent(m.session_id)}&limit=1`))?.[0];
+    if (!sess) { await sb(`port_messages?id=eq.${m.id}`, { method: "PATCH", body: { delivered: true } }); continue; }
+    // cross-daemon / in-flight guard: skip a session whose run is genuinely active (working & fresh).
+    if (sess.state === "working" && Date.now() - new Date(sess.updated_at || 0).getTime() < MAX_TURN_MS + 60000) continue;
+    // Claim BEFORE running so a crash/restart can't re-spawn a duplicate --resume on this session.
+    running.add(m.session_id);
+    await sb(`port_messages?id=eq.${m.id}`, { method: "PATCH", body: { delivered: true } });
+    processMessage(sess, m.content).finally(() => running.delete(m.session_id)); // concurrent: do NOT await
   }
 }
 
-console.log(`[port-server] up. claude=${CLAUDE} perm=${PERM || "(none!)"} poll=${POLL_MS}ms stream=on`);
+console.log(`[port-server] up. claude=${CLAUDE} perm=${PERM || "(none!)"} poll=${POLL_MS}ms stream=on conc=${MAX_CONCURRENT}`);
 for (;;) {
   try { await tick(); } catch (e) { console.error("[tick]", String(e).slice(0, 300)); }
   await new Promise((r) => setTimeout(r, POLL_MS));
