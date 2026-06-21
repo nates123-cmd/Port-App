@@ -63,6 +63,10 @@
   .assistant .tldr{font-size:15.5px;line-height:1.5}
   .assistant .q{margin-top:8px;font-weight:500}
   .cost{margin-top:8px;font-size:11px;color:var(--muted);opacity:.75;letter-spacing:.3px}
+  .cost.warn{color:var(--warn);opacity:.95;margin-top:4px}
+  #stop{border-color:var(--warn);color:var(--warn)}
+  button.mic{border:1px solid var(--line);background:var(--panel2);border-radius:12px;padding:0 12px;font-size:18px;line-height:1;color:var(--ink)}
+  button.mic.listening{border-color:var(--warn);color:var(--warn);animation:p 1.1s ease-in-out infinite}
   .tldr.stream::after{content:"▍";color:var(--accent);margin-left:1px;animation:blink 1s steps(1) infinite}
   @keyframes blink{50%{opacity:0}}
   .chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
@@ -118,12 +122,14 @@
     <header>
       <button class="back" id="back">‹</button>
       <span class="logo" id="ctitle">…</span>
+      <button class="hdrbtn" id="stop" hidden>■ Stop</button>
       <button class="hdrbtn" id="clear">Clear</button>
       <span class="sess" id="sess"></span>
     </header>
     <div id="log"></div>
     <div id="pull"><span id="pullspin">↻</span><span id="pulltxt">Swipe up to refresh</span></div>
     <form id="form">
+      <button class="mic" id="mic" type="button" title="Voice input">🎤</button>
       <textarea id="box" rows="1" placeholder="Message the session…" enterkeyhint="send"></textarea>
       <button class="send" id="send" type="submit">↑</button>
     </form>
@@ -137,7 +143,7 @@ const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFz
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
 const VAPID_PUBLIC = "BKG4e5bElkd_GtNWU9JSsrxoRqELKbiISYIyJF8Lj2B70ImUHYyBL2Dag9YsgEfuEAYDjdzkS0NgXihelSDNZmM";
 const $ = (id) => document.getElementById(id);
-const STATE_LABEL = { idle:"idle", working:"working…", waiting:"waiting on you", error:"error" };
+const STATE_LABEL = { idle:"idle", working:"working…", waiting:"waiting on you", error:"error", stop:"stopping…" };
 function view(v){ for (const n of ["auth","listview","chatview"]) $(n).hidden = (n!==v); }
 function esc(t){ const d=document.createElement("div"); d.textContent=t==null?"":String(t); return d.innerHTML; }
 
@@ -195,7 +201,11 @@ function fmtCost(card){
   if (card.num_turns!=null) parts.push(card.num_turns+" turn"+(card.num_turns===1?"":"s"));
   return parts.length ? parts.join(" \u00b7 ") : null;
 }
-function addCost(d,card){ const s=fmtCost(card); if(s){ const e=document.createElement("div"); e.className="cost"; e.textContent=s; d.appendChild(e); } }
+function addCost(d,card){
+  const s=fmtCost(card); if(s){ const e=document.createElement("div"); e.className="cost"; e.textContent=s; d.appendChild(e); }
+  if(card && card.rl){ const r=card.rl.resetsAt; const t=r?new Date(r*1000).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}):null;
+    const w=document.createElement("div"); w.className="cost warn"; w.textContent="⚠ rate limit"+(t?` · resets ${t}`:""); d.appendChild(w); }
+}
 function buildBody(d,m){
   d.innerHTML="";
   const card=m.card;
@@ -237,6 +247,7 @@ function render(m){                // create-or-update the bubble for this messa
 function setStatus(s){
   if (!s) return;
   $("sess").innerHTML = `<span class="dot s-${s.state} ${s.state==='working'?'pulse':''}"></span>${STATE_LABEL[s.state]||s.state}`;
+  $("stop").hidden = !(s.state==='working' || s.state==='stop'); // #4: show Stop only while running
 }
 async function openSession(s){
   cur=s.id; view("chatview"); $("ctitle").textContent=s.title||s.project||s.id; setStatus(s);
@@ -305,6 +316,22 @@ async function copy(t){ try{ await navigator.clipboard.writeText(t); toast("Copi
 async function deleteSession(s){ if(!confirm(`Delete "${s.title||s.id}"? Removes its chat.`)) return; await sb.from("port_sessions").delete().eq("id",s.id); loadSessions(); }
 async function clearChat(){ if(!cur) return; if(!confirm("Clear all messages in this chat?")) return; await sb.from("port_messages").delete().eq("session_id",cur); $("log").innerHTML=""; nodes.clear(); }
 $("clear").onclick=clearChat;
+// #4 Stop: signal the daemon (session state -> 'stop'); it kills the run within ~2.5s
+$("stop").onclick=async()=>{ if(!cur) return; $("stop").hidden=true; await sb.from("port_sessions").update({state:"stop"}).eq("id",cur); toast("Stopping…"); };
+// #6 Voice input: dictate into the composer (Web Speech API)
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec=null, listening=false;
+$("mic").onclick=()=>{
+  if(!SR){ toast("Voice not supported here"); return; }
+  if(listening){ rec&&rec.stop(); return; }
+  rec=new SR(); rec.lang="en-US"; rec.interimResults=true; rec.continuous=false;
+  const base=$("box").value;
+  rec.onresult=(e)=>{ let txt=""; for(const r of e.results) txt+=r[0].transcript; $("box").value=(base?base+" ":"")+txt; $("box").dispatchEvent(new Event("input")); };
+  rec.onend=()=>{ listening=false; $("mic").classList.remove("listening"); };
+  rec.onerror=()=>{ listening=false; $("mic").classList.remove("listening"); };
+  listening=true; $("mic").classList.add("listening"); try{ rec.start(); }catch{ listening=false; $("mic").classList.remove("listening"); }
+};
+if(!SR) $("mic").hidden=true;
 function urlB64ToU8(b){ const pad="=".repeat((4-b.length%4)%4); const s2=(b+pad).replace(/-/g,"+").replace(/_/g,"/"); const raw=atob(s2); return Uint8Array.from([...raw].map(c=>c.charCodeAt(0))); }
 async function enableNotifications(){
   try{
@@ -344,6 +371,9 @@ async function boot(){
     .on("postgres_changes",{event:"*",schema:"public",table:"port_sessions"},()=>{ if(!cur) loadSessions(); })
     .subscribe();
   setInterval(()=>{ if(!cur) loadSessions(); }, 6000);
+  // #7 deep-link: ?s=<id> (from a tapped notification) opens that session directly
+  const want=new URLSearchParams(location.search).get("s");
+  if (want){ history.replaceState({},"",location.pathname); const { data }=await sb.from("port_sessions").select("*").eq("id",want).limit(1); if(data&&data[0]) openSession(data[0]); }
 }
 // catch up automatically when the app returns to the foreground / network comes back
 // (the realtime socket dies when the phone sleeps, so we re-subscribe + silently re-fetch)

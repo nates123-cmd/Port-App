@@ -13,6 +13,13 @@ Supabase project `xsmnfcmtbpeaccnyinkr`; tables `port_sessions`, `port_messages`
 ---
 
 ## ✅ Done
+- **#2 Stuck-`working` reaper** — daemon sweeps abandoned working sessions (age > hard cap) → error.
+- **#3 Graceful turn cap** — on the 15-min kill, posts "reply 'continue' to resume" + a push, state stays resumable (not error).
+- **#4 Stop button** — header Stop while running sets session state `stop`; daemon polls every 2.5s and kills the run → "■ Stopped."
+- **#5 Credit/quota awareness** — daemon captures `rate_limit_event`; when actually limited, shows "⚠ rate limit · resets 4pm" under the reply.
+- **#6 Voice input** — 🎤 mic in the composer dictates via Web Speech API (hidden where unsupported). Frontend-only.
+- **#7 Notification deep-link** — push carries `sid`; SW opens `?s=<id>` (scope-relative); app boots straight into that session. sw v14.
+  ⚠️ *Needs the `port-push` Supabase edge fn to forward the `sid` field in its web-push payload — verify/patch there if deep-link doesn't fire.*
 - **#1 Per-session run lock** + claim-before-run (daemon) — one run per session, mark delivered
   up front (re-entrancy safe), reclaim abandoned `working` sessions older than the hard cap.
   *Code shipped; takes effect on the next idle daemon restart.*
@@ -80,9 +87,11 @@ transcribe into the textarea. Pure frontend. Most gym-native input; rare in comp
 **Fix:** include `session_id` in the push payload (daemon `pushNotify` → edge fn `port-push`);
 `sw.js` `notificationclick` opens `/?s=<id>`; frontend reads `?s=` on boot and `openSession`s it.
 
-### 8. Screenshot / image attach
+### 8. Screenshot / image attach  ← ONLY REMAINING ITEM
 Send an image into a session (e.g. a photo of an error). Upload to Supabase Storage, pass the
-path/URL in the message; daemon includes it for claude. Medium effort (storage bucket + RLS).
+path/URL in the message; daemon includes it for claude. **Deferred:** needs a Storage bucket +
+RLS policy created in Supabase (no MCP/DB access from the box) — do this from the dashboard or
+Supabase CLI first, then it's a small frontend (file input + upload) + daemon (pass path) change.
 
 ### 9. Cost-per-task display  ★ quick win
 Daemon already captures `total_cost_usd` + `num_turns` in `runClaudeStream` (currently unused).

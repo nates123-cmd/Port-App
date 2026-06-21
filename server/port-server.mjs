@@ -53,7 +53,7 @@ async function sb(path, { method = "GET", body, prefer } = {}) {
 
 // Run claude in streaming mode. onLive(text) fires as the reply grows (already
 // throttled by the caller is unnecessary — we just emit; caller decides cadence).
-function runClaudeStream({ prompt, cwd, resumeId, onLive }) {
+function runClaudeStream({ prompt, cwd, resumeId, onLive, checkStop }) {
   return new Promise((resolve) => {
     const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
     if (resumeId) args.push("--resume", resumeId);
@@ -61,8 +61,13 @@ function runClaudeStream({ prompt, cwd, resumeId, onLive }) {
     if (ALLOWED) args.push("--allowedTools", ALLOWED);
     const child = spawn(CLAUDE, args, { cwd: cwd || homedir(), env: process.env });
     let buf = "", live = "", finalText = "", sessionId = resumeId || null;
-    let isError = false, costUsd = null, numTurns = null, errText = "";
-    const killer = setTimeout(() => child.kill("SIGKILL"), MAX_TURN_MS);
+    let isError = false, costUsd = null, numTurns = null, errText = "", rate = null;
+    let stopped = false, timedOut = false;
+    const killer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, MAX_TURN_MS);
+    // #4: poll for a stop request from the phone (session state -> 'stop'); kill the run if asked
+    const stopPoll = checkStop ? setInterval(async () => {
+      try { if (await checkStop()) { stopped = true; clearInterval(stopPoll); child.kill("SIGKILL"); } } catch {}
+    }, 2500) : null;
 
     function feed(ev) {
       if (ev.session_id) sessionId = ev.session_id;
@@ -75,6 +80,10 @@ function runClaudeStream({ prompt, cwd, resumeId, onLive }) {
         } else if (e?.type === "content_block_delta" && e.delta?.type === "text_delta") {
           live += e.delta.text; onLive(live);
         }
+        return;
+      }
+      if (ev.type === "rate_limit_event") {
+        const i = ev.rate_limit_info; if (i) rate = { status: i.status, resetsAt: i.resetsAt, overageStatus: i.overageStatus };
         return;
       }
       if (ev.type === "result") {
@@ -97,14 +106,12 @@ function runClaudeStream({ prompt, cwd, resumeId, onLive }) {
     });
     child.stderr.on("data", (d) => (errText += d.toString()));
     child.on("close", (code) => {
-      clearTimeout(killer);
-      const text = finalText || live;
+      clearTimeout(killer); if (stopPoll) clearInterval(stopPoll);
+      const base = finalText || live;
+      if (stopped)  return resolve({ ok: false, stopped: true,  text: (base ? base + "\n\n" : "") + "■ Stopped.", sessionId, costUsd, numTurns, rate });
+      if (timedOut) return resolve({ ok: false, timedOut: true, text: (base ? base + "\n\n" : "") + "⏱ Hit the 15-min limit — reply \"continue\" to resume.", sessionId, costUsd, numTurns, rate });
       const ok = !isError && finalText !== "";
-      resolve({
-        ok,
-        text: ok ? text : (text || errText || `claude exited ${code}`).slice(0, 4000),
-        sessionId, costUsd, numTurns,
-      });
+      resolve({ ok, text: ok ? base : (base || errText || `claude exited ${code}`).slice(0, 4000), sessionId, costUsd, numTurns, rate });
     });
   });
 }
@@ -132,13 +139,14 @@ async function makeCard(raw) {
   } catch { return null; }
 }
 
-async function pushNotify(title, body) {
+async function pushNotify(title, body, sessionId) {
   if (!PUSH_SECRET) return;
   try {
     await fetch(`${URL}/functions/v1/port-push`, {
       method: "POST",
       headers: { authorization: `Bearer ${PUSH_SECRET}`, "content-type": "application/json" },
-      body: JSON.stringify({ title: `Port · ${title}`, body: (body || "needs your input").slice(0, 160) }),
+      // sid lets the SW deep-link to the session (#7); harmless if the edge fn doesn't forward it
+      body: JSON.stringify({ title: `Port · ${title}`, body: (body || "needs your input").slice(0, 160), sid: sessionId || null }),
     });
   } catch {}
 }
@@ -151,6 +159,14 @@ async function setState(id, state, lastLine) {
 }
 
 async function tick() {
+  // #2 reaper: flip abandoned 'working' sessions (daemon died mid-run) back to error so they
+  // stop spinning forever and the per-session lock releases. Threshold > hard cap, so a legit
+  // long run (updated_at stamped at run start) is never falsely reaped.
+  const stuck = await sb(`port_sessions?state=eq.working&user_id=eq.${OWNER}&select=id,updated_at`);
+  for (const s of stuck || []) {
+    if (Date.now() - new Date(s.updated_at || 0).getTime() > MAX_TURN_MS + 60000)
+      await setState(s.id, "error", "run abandoned (daemon restart?) — send a message to retry");
+  }
   // oldest undelivered user messages, owner-scoped
   const msgs = await sb(`port_messages?role=eq.user&delivered=eq.false&user_id=eq.${OWNER}&order=id.asc&limit=5`);
   const busy = new Set(); // sessions started this tick — one run per session at a time
@@ -193,13 +209,20 @@ async function tick() {
         else { clearTimeout(timer); timer = setTimeout(flushNow, LIVE_MS); }
       };
 
-      const res = await runClaudeStream({ prompt: m.content, cwd: sess.cwd, resumeId: sess.claude_session_id, onLive });
+      const checkStop = async () => {
+        try { const s = (await sb(`port_sessions?id=eq.${encodeURIComponent(sess.id)}&select=state`))?.[0]; return s?.state === "stop"; } catch { return false; }
+      };
+      const res = await runClaudeStream({ prompt: m.content, cwd: sess.cwd, resumeId: sess.claude_session_id, onLive, checkStop });
       done = true; clearTimeout(timer); pending = null;
       await inflight; // ensure the last streaming write lands before we finalize
 
+      const softStop = res.stopped || res.timedOut; // not a real error — leave the session resumable
       const summary = res.ok ? await makeCard(res.text) : null;
-      const meta = (res.costUsd != null || res.numTurns != null) ? { cost_usd: res.costUsd, num_turns: res.numTurns } : null;
-      const card = summary ? { ...summary, ...(meta || {}) } : meta; // meta-only card carries cost when there's no summary
+      const meta = {};
+      if (res.costUsd != null) meta.cost_usd = res.costUsd;
+      if (res.numTurns != null) meta.num_turns = res.numTurns;
+      if (res.rate && res.rate.status && res.rate.status !== "allowed") meta.rl = res.rate; // #5: surface only when actually limited
+      const card = summary ? { ...summary, ...meta } : (Object.keys(meta).length ? meta : null);
       const finalContent = res.text || (res.ok ? "(no output)" : "error");
       if (liveId) {
         await sb(`port_messages?id=eq.${liveId}`, { method: "PATCH", body: { content: finalContent, card } });
@@ -210,11 +233,12 @@ async function tick() {
       }
       await sb(`port_sessions?id=eq.${encodeURIComponent(sess.id)}`, { method: "PATCH", body: {
         claude_session_id: res.sessionId || sess.claude_session_id,
-        state: res.ok ? "waiting" : "error",
+        state: (res.ok || softStop) ? "waiting" : "error",
         last_line: finalContent.slice(0, 200),
         updated_at: new Date().toISOString(),
       }});
-      if (card && card.question) await pushNotify(sess.title || sess.id, card.question); // ping only when it asks a decision
+      if (res.ok && card && card.question) await pushNotify(sess.title || sess.id, card.question, sess.id); // ping when it asks a decision
+      else if (res.timedOut) await pushNotify(sess.title || sess.id, "⏱ hit the time limit — reply 'continue'", sess.id); // #3: don't fail silently
     } catch (e) {
       await sb("port_messages", { method: "POST", body: { user_id: OWNER, session_id: sess.id, role: "assistant", content: `⚠️ ${String(e).slice(0, 500)}`, delivered: true }});
       await setState(sess.id, "error", String(e).slice(0, 200));

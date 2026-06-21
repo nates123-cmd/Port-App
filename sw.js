@@ -1,4 +1,4 @@
-const C = "port-v13";
+const C = "port-v14";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg"];
 self.addEventListener("install", e => { self.skipWaiting(); e.waitUntil(caches.open(C).then(c => c.addAll(SHELL).catch(()=>{}))); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k=>k!==C).map(k=>caches.delete(k))))); self.clients.claim(); });
@@ -15,16 +15,17 @@ self.addEventListener("push", (e) => {
     const cls = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     if (cls.some((c) => c.visibilityState === "visible")) return; // app open -> skip
     await self.registration.showNotification(d.title || "Port", {
-      body: d.body || "", data: { url: d.url || "/" }, icon: "./icon.svg", badge: "./icon.svg", tag: "port"
+      body: d.body || "", data: { sid: d.sid || null }, icon: "./icon.svg", badge: "./icon.svg", tag: "port"
     });
   })());
 });
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
-  const url = (e.notification.data && e.notification.data.url) || "/";
+  const sid = e.notification.data && e.notification.data.sid;
+  const url = self.registration.scope + (sid ? "?s=" + encodeURIComponent(sid) : ""); // scope-relative so it works under /Port-App/
   e.waitUntil((async () => {
     const cls = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-    for (const c of cls) { if ("focus" in c) return c.focus(); }
+    for (const c of cls) { if ("focus" in c) { if (sid && "navigate" in c) { try { await c.navigate(url); } catch {} } return c.focus(); } }
     if (self.clients.openWindow) return self.clients.openWindow(url);
   })());
 });
