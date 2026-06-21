@@ -67,6 +67,11 @@
   #stop{border-color:var(--warn);color:var(--warn)}
   button.mic{border:1px solid var(--line);background:var(--panel2);border-radius:12px;padding:0 12px;font-size:18px;line-height:1;color:var(--ink)}
   button.mic.listening{border-color:var(--warn);color:var(--warn);animation:p 1.1s ease-in-out infinite}
+  #attbar{display:flex;align-items:center;gap:9px;padding:8px 12px 0}
+  #attprev{height:46px;width:46px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
+  #attname{color:var(--muted);font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #attx{background:none;border:none;color:var(--muted);font-size:22px;line-height:1;padding:0 4px}
+  img.att{max-width:220px;max-height:220px;border-radius:10px;margin-top:8px;display:block;border:1px solid var(--line)}
   .tldr.stream::after{content:"▍";color:var(--accent);margin-left:1px;animation:blink 1s steps(1) infinite}
   @keyframes blink{50%{opacity:0}}
   .chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
@@ -128,10 +133,13 @@
     </header>
     <div id="log"></div>
     <div id="pull"><span id="pullspin">↻</span><span id="pulltxt">Swipe up to refresh</span></div>
+    <div id="attbar" hidden><img id="attprev" alt="" /><span id="attname">image</span><button id="attx" type="button" title="Remove">×</button></div>
     <form id="form">
+      <button class="mic" id="att" type="button" title="Attach image">📎</button>
       <button class="mic" id="mic" type="button" title="Voice input">🎤</button>
       <textarea id="box" rows="1" placeholder="Message the session…" enterkeyhint="send"></textarea>
       <button class="send" id="send" type="submit">↑</button>
+      <input id="attfile" type="file" accept="image/*" hidden />
     </form>
   </div>
 </div>
@@ -232,6 +240,8 @@ function buildBody(d,m){
   } else {
     if (m.role!=="system"){ const r=document.createElement("div"); r.className="role"; r.textContent=m.role; d.appendChild(r); }
     const c=document.createElement("div"); c.textContent=m.content; c.style.cursor="pointer"; c.title="Tap to copy"; c.onclick=()=>copy(m.content); d.appendChild(c);
+    if (m.role==="user" && card && card.att){ const img=document.createElement("img"); img.className="att"; d.appendChild(img);
+      sb.storage.from("port-uploads").createSignedUrl(card.att,3600).then(({data})=>{ if(data&&data.signedUrl) img.src=data.signedUrl; }).catch(()=>{}); }
     if (m.role==="assistant") addCost(d,card);   // cost line even when there's no summary card
   }
 }
@@ -270,16 +280,33 @@ $("back").onclick=()=>{ if(msgChan){sb.removeChannel(msgChan);msgChan=null;} cur
 $("ctitle").onclick=async()=>{ if(!cur)return; const v=prompt("Rename session",$("ctitle").textContent); if(v&&v.trim()){ const nn=v.trim(); await sb.from("port_sessions").update({title:nn}).eq("id",cur); $("ctitle").textContent=nn; } };
 $("box").addEventListener("input",()=>{ const b=$("box"); b.style.height="auto"; b.style.height=Math.min(b.scrollHeight,130)+"px"; });
 $("box").addEventListener("keydown",(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); $("form").requestSubmit(); }});
-async function sendText(content){
+async function sendText(content, card){
   if(!cur||!content) return;
   const { data:{ user } } = await sb.auth.getUser();
-  const { error } = await sb.from("port_messages").insert({ session_id:cur, role:"user", content, user_id:user.id });
+  const { error } = await sb.from("port_messages").insert({ session_id:cur, role:"user", content, user_id:user.id, ...(card?{card}:{}) });
   if (error) render({ id:"e"+Date.now(), role:"system", content:"send failed: "+error.message });
 }
+let pendingAtt=null; // storage path of an uploaded-but-not-yet-sent image (#8)
 $("form").onsubmit=async(e)=>{
   e.preventDefault();
-  const content=$("box").value.trim(); if(!content) return;
-  $("box").value=""; $("box").style.height="auto"; await sendText(content);
+  const content=$("box").value.trim(); if(!content && !pendingAtt) return;
+  const card = pendingAtt ? { att: pendingAtt } : null;
+  $("box").value=""; $("box").style.height="auto";
+  pendingAtt=null; $("attbar").hidden=true; $("attprev").removeAttribute("src");
+  await sendText(content || "Take a look at this image.", card);
+};
+// #8 attach an image: upload to port-uploads/<uid>/..., stage it, send with the next message
+$("att").onclick=()=>$("attfile").click();
+$("attx").onclick=()=>{ pendingAtt=null; $("attbar").hidden=true; $("attprev").removeAttribute("src"); };
+$("attfile").onchange=async(e)=>{
+  const f=e.target.files&&e.target.files[0]; $("attfile").value=""; if(!f) return;
+  const { data:{ user } } = await sb.auth.getUser();
+  const ext=((f.name.split(".").pop()||"png").toLowerCase().replace(/[^a-z0-9]/g,"")||"png");
+  const path=`${user.id}/${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+  toast("Uploading…");
+  const { error }=await sb.storage.from("port-uploads").upload(path, f, { contentType:f.type||"image/png", upsert:false });
+  if(error){ toast("Upload failed: "+error.message); return; }
+  pendingAtt=path; $("attprev").src=URL.createObjectURL(f); $("attname").textContent=f.name||"image"; $("attbar").hidden=false; toast("Image attached");
 };
 
 async function refreshChat(){

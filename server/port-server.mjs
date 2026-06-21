@@ -20,6 +20,7 @@
  */
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
+import { writeFile, mkdir } from "node:fs/promises";
 
 const URL = need("SUPABASE_URL");
 const KEY = need("SUPABASE_SERVICE_KEY");
@@ -153,6 +154,22 @@ async function pushNotify(title, body, sessionId) {
   } catch {}
 }
 
+// #8: download an attached image from the port-uploads bucket (service key bypasses RLS) to a
+// local temp file so Claude can view it with the Read tool. Returns the local path, or null.
+async function downloadAttachment(path) {
+  try {
+    const enc = String(path).split("/").map(encodeURIComponent).join("/");
+    const r = await fetch(`${URL}/storage/v1/object/port-uploads/${enc}`, { headers: { apikey: KEY, authorization: `Bearer ${KEY}` } });
+    if (!r.ok) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    const dir = `${homedir()}/port/att`;
+    await mkdir(dir, { recursive: true });
+    const local = `${dir}/${String(path).replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+    await writeFile(local, buf);
+    return local;
+  } catch { return null; }
+}
+
 async function setState(id, state, lastLine) {
   await sb(`port_sessions?id=eq.${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -160,9 +177,17 @@ async function setState(id, state, lastLine) {
   });
 }
 
-async function processMessage(sess, content) {
+async function processMessage(sess, msg) {
     try {
       await setState(sess.id, "working", "thinking…");
+
+      // #8: if the user attached an image, fetch it locally and tell Claude where to Read it.
+      let prompt = msg.content;
+      const att = msg.card && msg.card.att;
+      if (att) {
+        const local = await downloadAttachment(att);
+        if (local) prompt = `${prompt}\n\n[The user attached an image — view it with the Read tool at: ${local}]`;
+      }
 
       // Create the live assistant row the PWA fills in as text streams (card.streaming = placeholder).
       const ins = await sb("port_messages", {
@@ -189,7 +214,7 @@ async function processMessage(sess, content) {
       const checkStop = async () => {
         try { const s = (await sb(`port_sessions?id=eq.${encodeURIComponent(sess.id)}&select=state`))?.[0]; return s?.state === "stop"; } catch { return false; }
       };
-      const res = await runClaudeStream({ prompt: content, cwd: sess.cwd, resumeId: sess.claude_session_id, onLive, checkStop });
+      const res = await runClaudeStream({ prompt, cwd: sess.cwd, resumeId: sess.claude_session_id, onLive, checkStop });
       done = true; clearTimeout(timer); pending = null;
       await inflight; // ensure the last streaming write lands before we finalize
 
@@ -246,7 +271,7 @@ async function tick() {
     // Claim BEFORE running so a crash/restart can't re-spawn a duplicate --resume on this session.
     running.add(m.session_id);
     await sb(`port_messages?id=eq.${m.id}`, { method: "PATCH", body: { delivered: true } });
-    processMessage(sess, m.content).finally(() => running.delete(m.session_id)); // concurrent: do NOT await
+    processMessage(sess, m).finally(() => running.delete(m.session_id)); // concurrent: do NOT await
   }
 }
 

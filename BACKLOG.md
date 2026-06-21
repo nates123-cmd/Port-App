@@ -13,6 +13,11 @@ Supabase project `xsmnfcmtbpeaccnyinkr`; tables `port_sessions`, `port_messages`
 ---
 
 ## ✅ Done
+- **#8 Image attach** — `port-uploads` bucket created (private, 15 MB, image mimes); 📎 in the
+  composer uploads to `<uid>/…` and sends it with the message; daemon downloads it (service key)
+  and points Claude's Read tool at the local file; sent images show a thumbnail. sw v15.
+  ⚠️ *One manual step:* run `server/storage-policies.sql` in the Supabase SQL editor to add the
+  upload/read RLS — until then the PWA upload fails with a row-level-security error.
 - **Concurrent sessions** — daemon runs up to `MAX_CONCURRENT` (default 3, env-tunable) distinct
   sessions at once instead of one-at-a-time. Per-session lock keeps a single session serial and
   ordered; reaper skips actively-running sessions. Set `MAX_CONCURRENT=1` for the old serial behavior.
@@ -90,11 +95,7 @@ transcribe into the textarea. Pure frontend. Most gym-native input; rare in comp
 **Fix:** include `session_id` in the push payload (daemon `pushNotify` → edge fn `port-push`);
 `sw.js` `notificationclick` opens `/?s=<id>`; frontend reads `?s=` on boot and `openSession`s it.
 
-### 8. Screenshot / image attach  ← ONLY REMAINING ITEM
-Send an image into a session (e.g. a photo of an error). Upload to Supabase Storage, pass the
-path/URL in the message; daemon includes it for claude. **Deferred:** needs a Storage bucket +
-RLS policy created in Supabase (no MCP/DB access from the box) — do this from the dashboard or
-Supabase CLI first, then it's a small frontend (file input + upload) + daemon (pass path) change.
+### 8. Screenshot / image attach — ✅ DONE (see Done section; one SQL step remains)
 
 ### 9. Cost-per-task display  ★ quick win
 Daemon already captures `total_cost_usd` + `num_turns` in `runClaudeStream` (currently unused).
