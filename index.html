@@ -95,6 +95,18 @@
   #pull.loading #pullspin{animation:spin .7s linear infinite}
   #pullspin{display:inline-block;font-size:14px}
   @keyframes spin{to{transform:rotate(360deg)}}
+  .composer{position:relative}
+  #slashmenu{position:absolute;left:8px;right:8px;bottom:100%;margin-bottom:6px;background:var(--panel2);
+    border:1px solid var(--line);border-radius:12px;max-height:min(46vh,320px);overflow-y:auto;
+    box-shadow:0 10px 30px rgba(0,0,0,.45);z-index:40;-webkit-overflow-scrolling:touch}
+  .slashitem{display:flex;flex-direction:column;gap:2px;padding:9px 13px;cursor:pointer;border-bottom:1px solid var(--line)}
+  .slashitem:last-child{border-bottom:none}
+  .slashitem.sel{background:rgba(224,163,106,.16)}
+  .slashitem .cmd{font-family:var(--font-mono);font-size:14.5px;color:var(--ink)}
+  .slashitem .cmd b{color:var(--accent);font-weight:600}
+  .slashitem .desc{font-size:12px;color:var(--muted);line-height:1.35;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .slashempty{padding:11px 13px;color:var(--muted);font-size:13px}
 </style>
 </head>
 <body>
@@ -134,6 +146,8 @@
     <div id="log"></div>
     <div id="pull"><span id="pullspin">↻</span><span id="pulltxt">Swipe up to refresh</span></div>
     <div id="attbar" hidden><img id="attprev" alt="" /><span id="attname">image</span><button id="attx" type="button" title="Remove">×</button></div>
+    <div class="composer">
+    <div id="slashmenu" hidden></div>
     <form id="form">
       <button class="mic" id="att" type="button" title="Attach image">📎</button>
       <button class="mic" id="mic" type="button" title="Voice input">🎤</button>
@@ -141,6 +155,7 @@
       <button class="send" id="send" type="submit">↑</button>
       <input id="attfile" type="file" accept="image/*" hidden />
     </form>
+    </div>
   </div>
 </div>
 
@@ -278,8 +293,87 @@ function subscribeChat(){
 $("back").onclick=()=>{ if(msgChan){sb.removeChannel(msgChan);msgChan=null;} cur=null; view("listview"); loadSessions(); };
 
 $("ctitle").onclick=async()=>{ if(!cur)return; const v=prompt("Rename session",$("ctitle").textContent); if(v&&v.trim()){ const nn=v.trim(); await sb.from("port_sessions").update({title:nn}).eq("id",cur); $("ctitle").textContent=nn; } };
-$("box").addEventListener("input",()=>{ const b=$("box"); b.style.height="auto"; b.style.height=Math.min(b.scrollHeight,130)+"px"; });
-$("box").addEventListener("keydown",(e)=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); $("form").requestSubmit(); }});
+$("box").addEventListener("input",()=>{ const b=$("box"); b.style.height="auto"; b.style.height=Math.min(b.scrollHeight,130)+"px"; renderSlash(); });
+
+// ── Slash-command palette: type "/" to filter skills, like Claude Code ──
+const SKILLS=[
+  // apps
+  {n:"amanda",d:"Amanda gift app"},
+  {n:"break",d:"5-Minute Break app"},
+  {n:"course",d:"Course project cockpit"},
+  {n:"course-plus",d:"Course+ workspace"},
+  {n:"crate",d:"DJ set-building app"},
+  {n:"cue",d:"Recommendation library + media log"},
+  {n:"ink",d:"Reflective journaling PWA"},
+  {n:"patch",d:"Suite bug/feature/idea capture inbox"},
+  {n:"scribe",d:"Notes / reference / deliverable PWA"},
+  {n:"stock",d:"Recipe / pantry PWA"},
+  {n:"tick",d:"Habit tracker"},
+  {n:"tide",d:"Mindful-drinking + intake tracker"},
+  {n:"today",d:"Morning-ritual PWA"},
+  {n:"suite",d:"Personal OS app-suite index"},
+  // infra / ops
+  {n:"beelink",d:"Manage the Beelink home server"},
+  {n:"beelink-port",d:"Port a project to the Beelink & back"},
+  {n:"gym",d:"Hand this session to your phone"},
+  {n:"port",d:"Drive the current Mac work from Port"},
+  {n:"jellyfin",d:"Media server / *arr stack ops"},
+  {n:"torrent-stack",d:"Download-pipeline health snapshot"},
+  {n:"openclaw",d:"Manage the Telegram bot"},
+  {n:"murmur",d:"macOS dictation app"},
+  {n:"remarkable",d:"reMarkable 2 tooling"},
+  // workflow / meta
+  {n:"recap",d:"Simplest status + the one next action"},
+  {n:"ship",d:"Ship the current app update"},
+  {n:"patch-triage",d:"Triage the Patch inbox"},
+  {n:"nate-voice",d:"Write / rewrite in Nate's voice"},
+  {n:"tutor",d:"Rigorous tutor to real mastery"},
+  {n:"deep-research",d:"Fan-out, fact-checked research report"},
+  {n:"code-review",d:"Review the current diff for bugs"},
+  {n:"simplify",d:"Clean up the changed code"},
+  {n:"verify",d:"Run the app to verify a change"},
+  {n:"run",d:"Launch this project's app"},
+  {n:"loop",d:"Run a command on a recurring interval"},
+  {n:"schedule",d:"Manage scheduled cloud agents"},
+  {n:"update-config",d:"Configure hooks / permissions"},
+  {n:"fewer-permission-prompts",d:"Reduce permission prompts"},
+  {n:"keybindings-help",d:"Customize keybindings"},
+  {n:"claude-api",d:"Claude API / SDK reference"},
+  {n:"init",d:"Initialize a CLAUDE.md"},
+  {n:"review",d:"Review a pull request"},
+  {n:"security-review",d:"Security review of the branch"},
+];
+const smenu=$("slashmenu");
+let slashItems=[], slashSel=0, slashOpen=false;
+function slashQuery(){ const m=/^\/([a-z0-9-]*)$/i.exec($("box").value); return m?m[1].toLowerCase():null; }
+function hi(name,q){ if(!q) return "/"+esc(name); const i=name.indexOf(q); if(i<0) return "/"+esc(name);
+  return "/"+esc(name.slice(0,i))+"<b>"+esc(name.slice(i,i+q.length))+"</b>"+esc(name.slice(i+q.length)); }
+function closeSlash(){ slashOpen=false; slashItems=[]; smenu.hidden=true; smenu.innerHTML=""; }
+function chooseSlash(i){ const s=slashItems[i]; if(!s) return; const b=$("box"); b.value="/"+s.n+" "; closeSlash(); b.focus(); b.dispatchEvent(new Event("input")); }
+function updateSlashSel(){ [...smenu.children].forEach((el,i)=>el.classList.toggle("sel",i===slashSel)); const cur=smenu.children[slashSel]; if(cur&&cur.scrollIntoView) cur.scrollIntoView({block:"nearest"}); }
+function renderSlash(){
+  const q=slashQuery();
+  if(q===null){ closeSlash(); return; }
+  const items=SKILLS.filter(s=>s.n.includes(q)).sort((a,b)=>((a.n.startsWith(q)?0:1)-(b.n.startsWith(q)?0:1))||a.n.localeCompare(b.n));
+  slashItems=items; slashSel=0; slashOpen=true; smenu.hidden=false;
+  if(!items.length){ smenu.innerHTML='<div class="slashempty">No matching skills</div>'; return; }
+  smenu.innerHTML="";
+  items.forEach((s,i)=>{
+    const el=document.createElement("div"); el.className="slashitem"+(i===0?" sel":"");
+    el.innerHTML=`<span class="cmd">${hi(s.n,q)}</span><span class="desc">${esc(s.d)}</span>`;
+    el.addEventListener("pointerdown",(e)=>{ e.preventDefault(); chooseSlash(i); });
+    smenu.appendChild(el);
+  });
+}
+$("box").addEventListener("keydown",(e)=>{
+  if(slashOpen && slashItems.length){
+    if(e.key==="ArrowDown"){ e.preventDefault(); slashSel=(slashSel+1)%slashItems.length; updateSlashSel(); return; }
+    if(e.key==="ArrowUp"){ e.preventDefault(); slashSel=(slashSel-1+slashItems.length)%slashItems.length; updateSlashSel(); return; }
+    if(e.key==="Enter"||e.key==="Tab"){ e.preventDefault(); chooseSlash(slashSel); return; }
+    if(e.key==="Escape"){ e.preventDefault(); closeSlash(); return; }
+  }
+  if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); $("form").requestSubmit(); }
+});
 async function sendText(content, card){
   if(!cur||!content) return;
   const { data:{ user } } = await sb.auth.getUser();
