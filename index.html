@@ -296,7 +296,9 @@ $("ctitle").onclick=async()=>{ if(!cur)return; const v=prompt("Rename session",$
 $("box").addEventListener("input",()=>{ const b=$("box"); b.style.height="auto"; b.style.height=Math.min(b.scrollHeight,130)+"px"; renderSlash(); });
 
 // ── Slash-command palette: type "/" to filter skills, like Claude Code ──
-const SKILLS=[
+// SKILLS below is the offline fallback / first-paint list; loadSkills() replaces
+// it at runtime from skills.json (auto-generated on the Beelink from ~/.claude/skills).
+let SKILLS=[
   // apps
   {n:"amanda",d:"Amanda gift app"},
   {n:"break",d:"5-Minute Break app"},
@@ -343,6 +345,15 @@ const SKILLS=[
   {n:"review",d:"Review a pull request"},
   {n:"security-review",d:"Security review of the branch"},
 ];
+async function loadSkills(){
+  try{
+    const r=await fetch("./skills.json?cb="+Date.now(),{cache:"no-store"});
+    if(!r.ok) return;
+    const j=await r.json();
+    if(Array.isArray(j)&&j.length&&j.every(x=>x&&x.n&&x.d)){ SKILLS=j; if(slashOpen) renderSlash(); }
+  }catch{}
+}
+loadSkills();
 const smenu=$("slashmenu");
 let slashItems=[], slashSel=0, slashOpen=false;
 function slashQuery(){ const m=/^\/([a-z0-9-]*)$/i.exec($("box").value); return m?m[1].toLowerCase():null; }
